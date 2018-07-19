@@ -121,16 +121,12 @@ void wipeAll(int hue) {
   FastLED.show();
 }
 
-int pwm_to_hue(int pwm) {
-  return int(359.0 * ((float(pwm) - 1000.0) / 1000.0));
-}
-
-int rgb_to_ledcolor(int rgb[3]) {
-  return ((rgb[1] << 16) & 0xff0000) | ((rgb[0] << 8) & 0xff00) | ((rgb[2 ]) & 0xff);
+int pwmToHue(int pwm) {
+  return int(255 * ((float(pwm) - 1000.0) / 1000.0));
 }
 
 void handleColor() {
-    wipeAll(int(255.0 * (led_in - 1500) / 1000.0));
+    wipeAll(pwmToHue(led_in));
 }
 
 void serviceOutputs() {
