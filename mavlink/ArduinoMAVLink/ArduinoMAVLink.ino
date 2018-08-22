@@ -1,64 +1,118 @@
-
-
 #include "mavlink.h"
 
 #define px4_serial Serial1
 #define debug_serial Serial
 
+#define BTN_SWAP 12
+#define BTN_GO_RANDOM 17
+#define BTN_GO_HOME 18
+#define BTN_COLOR 19
+#define BTN_GNE 22
+#define BTN_PLASMA 23
+
+enum State {
+  INITIAL_STATE,
+  HOME_MODE,
+  RANDOM_MODE
+};
+
+const float home_lat = 12.3;
+const float home_lon = 12.2;
+
+State state = INITIAL_STATE;
+
 volatile int servo_in = 1500;
 
-// Mavlink variables
 unsigned long previousMillisMAVLink = 0;     // will store last time MAVLink was transmitted and listened
 unsigned long next_interval_MAVLink = 1000;  // next interval to count
 const int num_hbs = 10;                      // # of heartbeats to wait before activating STREAMS from Pixhawk. 60 = one minute.
 int heartbeat_count = num_hbs;
-const float MIN_BAT_VOLTAGE = 13.5;
+const float MIN_BAT_VOLTAGE = 14.5;
 
-volatile float battery_voltage = 0;
+volatile float battery_voltage = 0.0;
 
 
 #define debug_serial Serial
 
 void setup() {
-    pinMode(12, INPUT_PULLUP); 
-  pinMode(23, INPUT_PULLUP); 
-  pinMode(22, INPUT_PULLUP); 
-  pinMode(19, INPUT_PULLUP); 
-  pinMode(18, INPUT_PULLUP); 
-  pinMode(17, INPUT_PULLUP); 
+  randomSeed(analogRead(14));
+  for (int i = 0; i < 1000; ++i) {
+    random_float(0, 200);
+  }
+  pinMode(BTN_SWAP, INPUT_PULLUP);
+  pinMode(BTN_GO_RANDOM, INPUT_PULLUP);
+  pinMode(BTN_GO_HOME, INPUT_PULLUP);
+  pinMode(BTN_COLOR, INPUT_PULLUP);
+  pinMode(BTN_GNE, INPUT_PULLUP);
+  pinMode(BTN_PLASMA, INPUT_PULLUP);
   debug_serial.begin(115200);
   debug_serial.println("MAVLink starting.");
   px4_serial.begin(38400);
   initLeds();
+}
 
+double random_float(double value_min, double value_max) {
+  double num = random(0, 16384);
+  double coef = (value_max - value_min) / 16384;
+  return num * coef + value_min / 16384;
+}
+
+const float pi = 3.141592;
+
+void get_random_coordinate(double* lat, double* lon) {
+  const float brc_center_lat = -119.20610;
+  const float brc_center_lon = 40.78684;
+  const double r_earth = 6371393;
+  double r = random_float(0.0, 2200.0);
+  double offset = pi / 9.3;
+  double angle = random_float(offset, 2 * pi - (2. / 3.) * pi + offset );
+  double dx = 1.0 * r * cos(angle);
+  double dy = 0.4 * r * sin(angle);
+  *lat = brc_center_lat  + (dx / r_earth) * (180.0 / pi);
+  *lon = brc_center_lon + (dy / r_earth) * (180.0 / pi) / cos(brc_center_lat * pi / 180.0);
+}
+
+void handle_leds() {
+  if (digitalRead(BTN_PLASMA) == 0) {
+    plasmaLoop();
+    return;
+  }
+  if (digitalRead(BTN_SWAP) == 0) {
+    swipeLoop(0xFFFFFF);
+    return;
+  }
+  if (digitalRead(BTN_COLOR) == 0) {
+    swipeColor(0);
+    return;
+  }
 }
 
 volatile bool mission_set = false;
 void loop() {
-  if (digitalRead(12) == 0) {
-    plasmaLoop();
-    return;
-  }
-  if (digitalRead(23) == 0) {
-    swipeLoop(0xFFFFFF);
-    return;
-  }
-  if (digitalRead(19) == 0) {
-    swipeColor(0);
-    return;
-  }
   if (battery_voltage < MIN_BAT_VOLTAGE) {
-    wipeHue(60);
-    delay(200);
-    wipeAll(0);
-    delay(200);
+    wipeAll(0x00000);
   } else {
-    wipePwm(servo_in);
+    if (digitalRead(BTN_GO_HOME) == 0) {
+      if (state != HOME_MODE) {
+        mav_set_mission(home_lat, home_lon);
+        state = HOME_MODE;
+      }
+    } else if (digitalRead(BTN_GO_RANDOM) == 0) {
+      if (state != RANDOM_MODE) {
+        mav_set_mission(home_lat, home_lon);
+        state = RANDOM_MODE;
+      }
+    } else {
+      debug_serial.println("handling leds");
+      handle_leds();
+      return;
+    }
   }
+
+  wipePwm(servo_in);
+
   // MAVLink
-  /* The default UART header for your MCU */
-  int sysid = 1;                   ///< ID 20 for this airplane. 1 PX, 255 ground station
-  // TODO(johmathe): Whi is this 0
+  int sysid = 1;
   int compid = 0;                ///< The component sending the message
   int type = MAV_TYPE_QUADROTOR;   ///< This system is an airplane / fixed wing
 
@@ -92,85 +146,38 @@ void loop() {
     heartbeat_count++;
 
     if (heartbeat_count >= num_hbs) {
-      // Request streams from Pixhawk
       debug_serial.println("Streams requested!");
-      Mav_Request_Data();
+      mav_start_streams();
       heartbeat_count = 0;
     }
 
     if (heartbeat_count == (num_hbs - 2) && !mission_set) {
-      // Request streams from Pixhawk
       debug_serial.println("Mission setting:");
-      MavSetMission(10, 10);
+      mav_set_mission(home_lat, home_lon);
       mission_set = true;
     }
   }
-
-  // Check reception buffer
   comm_receive();
 }
 
-void Mav_Request_Data()
+void mav_start_streams()
 {
   mavlink_message_t msg;
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  const int  max_streams = 2;
+  const uint8_t MAVStreams[max_streams] = {MAV_DATA_STREAM_EXTENDED_STATUS, MAV_DATA_STREAM_RC_CHANNELS};
+  const uint16_t MAVRates[max_streams] = {0x01, 0x08};
 
-  // To be setup according to the needed information to be requested from the Pixhawk
-  const int  maxStreams = 2;
-  const uint8_t MAVStreams[maxStreams] = {MAV_DATA_STREAM_EXTENDED_STATUS, MAV_DATA_STREAM_RC_CHANNELS};
-  const uint16_t MAVRates[maxStreams] = {0x01, 0x08};
-
-  for (int i = 0; i < maxStreams; i++) {
-    /*
-       mavlink_msg_request_data_stream_pack(system_id, component_id,
-          &msg,
-          target_system, target_component,
-          MAV_DATA_STREAM_POSITION, 10000000, 1);
-
-       mavlink_msg_request_data_stream_pack(uint8_t system_id, uint8_t component_id,
-          mavlink_message_t* msg,
-          uint8_t target_system, uint8_t target_component, uint8_t req_stream_id,
-          uint16_t req_message_rate, uint8_t start_stop)
-
-    */
+  for (int i = 0; i < max_streams; ++i) {
     mavlink_msg_request_data_stream_pack(2, 200, &msg, 1, 0, MAVStreams[i], MAVRates[i], 1);
     uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
     px4_serial.write(buf, len);
   }
 }
 
-
-
-/**
-   @brief Pack a mission_item message
-   @param system_id ID of this system
-   @param component_id ID of this component (e.g. 200 for IMU)
-   @param msg The MAVLink message to compress the data into
-
-   @param target_system  System ID
-   @param target_component  Component ID
-   @param seq  Sequence
-   @param frame  The coordinate system of the waypoint.
-   @param command  The scheduled action for the waypoint.
-   @param current  false:0, true:1
-   @param autocontinue  Autocontinue to next waypoint
-   @param param1  PARAM1, see MAV_CMD enum
-   @param param2  PARAM2, see MAV_CMD enum
-   @param param3  PARAM3, see MAV_CMD enum
-   @param param4  PARAM4, see MAV_CMD enum
-   @param x  PARAM5 / local: X coordinate, global: latitude
-   @param y  PARAM6 / local: Y coordinate, global: longitude
-   @param z  PARAM7 / local: Z coordinate, global: altitude (relative or absolute, depending on frame).
-   @return length of the message in bytes (excluding serial stream start sign)
-*/
-// static inline uint16_t mavlink_msg_mission_item_pack(uint8_t system_id, uint8_t component_id, mavlink_message_t* msg,//
-//                               uint8_t target_system, uint8_t target_component, uint16_t seq, uint8_t frame, uint16_t command, uint8_t current, uint8_t autocontinue, float param1, float param2, float param3, float param4, float x, float y, float z)
-
-
-void MavSetMission(double lat, double lon) {
+void mav_set_mission(double lat, double lon) {
   mavlink_message_t msg;
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-
   mavlink_msg_mission_clear_all_pack(2, 200, &msg, 1, 1);
   uint16_t  len = mavlink_msg_to_send_buffer(buf, &msg);
   px4_serial.write(buf, len);
@@ -202,11 +209,7 @@ void wait_for_mission_ack() {
   while (true) {
     while (px4_serial.available() > 0) {
       uint8_t c = px4_serial.read();
-
-      // Try to get a new message
       if (mavlink_parse_char(MAVLINK_COMM_0, c, &msg, &status)) {
-
-        // Handle message
         switch (msg.msgid) {
           case MAVLINK_MSG_ID_MISSION_ACK:  // #0: Heartbeat
             {
@@ -216,13 +219,12 @@ void wait_for_mission_ack() {
             break;
           case MAVLINK_MSG_ID_MISSION_REQUEST:  // #0: Heartbeat
             {
-              debug_serial.println("MISSION REQEUEST");
+              debug_serial.println("MISSION REQUEST");
               return;
             }
             break;
           default:
             {
-              debug_serial.println("PROUT");
             }
             break;
         }
@@ -237,19 +239,14 @@ void comm_receive() {
 
   while (px4_serial.available() > 0) {
     uint8_t c = px4_serial.read();
-
-    // Try to get a new message
     if (mavlink_parse_char(MAVLINK_COMM_0, c, &msg, &status)) {
-
-      // Handle message
       switch (msg.msgid) {
-        case MAVLINK_MSG_ID_HEARTBEAT:  // #0: Heartbeat
+        case MAVLINK_MSG_ID_HEARTBEAT:
           {
-            debug_serial.println("PX HB");
           }
           break;
 
-        case MAVLINK_MSG_ID_SYS_STATUS:  // #1: SYS_STATUS
+        case MAVLINK_MSG_ID_SYS_STATUS:
           {
             mavlink_sys_status_t sys_status;
             mavlink_msg_sys_status_decode(&msg, &sys_status);
