@@ -3,12 +3,18 @@
 #define px4_serial Serial1
 #define debug_serial Serial
 
-#define BTN_SWAP 12
-#define BTN_GO_RANDOM 17
-#define BTN_GO_HOME 18
-#define BTN_COLOR 19
-#define BTN_GNE 22
-#define BTN_PLASMA 23
+// top left 12
+// top right 17
+// center left 23
+// center right  18
+// bottom right 19
+// bottom left 22
+#define BTW_SWIPE 12
+#define BTN_GO_RANDOM 19
+#define BTN_GO_HOME 22
+#define BTN_COLOR 23
+#define BTN_GNE 18
+#define BTN_PLASMA 17
 
 enum State {
   INITIAL_STATE,
@@ -16,8 +22,8 @@ enum State {
   RANDOM_MODE
 };
 
-const float home_lat = 12.3;
-const float home_lon = 12.2;
+const float home_lat = 40.7908011;
+const float home_lon = -119.2141898;
 
 State state = INITIAL_STATE;
 
@@ -27,19 +33,16 @@ unsigned long previousMillisMAVLink = 0;     // will store last time MAVLink was
 unsigned long next_interval_MAVLink = 1000;  // next interval to count
 const int num_hbs = 10;                      // # of heartbeats to wait before activating STREAMS from Pixhawk. 60 = one minute.
 int heartbeat_count = num_hbs;
-const float MIN_BAT_VOLTAGE = 14.5;
+const float MIN_BAT_VOLTAGE = 14500.5;
 
-volatile float battery_voltage = 0.0;
+volatile float battery_voltage = 15000;
 
 
 #define debug_serial Serial
 
 void setup() {
   randomSeed(analogRead(14));
-  for (int i = 0; i < 1000; ++i) {
-    random_float(0, 200);
-  }
-  pinMode(BTN_SWAP, INPUT_PULLUP);
+  pinMode(BTW_SWIPE, INPUT_PULLUP);
   pinMode(BTN_GO_RANDOM, INPUT_PULLUP);
   pinMode(BTN_GO_HOME, INPUT_PULLUP);
   pinMode(BTN_COLOR, INPUT_PULLUP);
@@ -60,8 +63,8 @@ double random_float(double value_min, double value_max) {
 const float pi = 3.141592;
 
 void get_random_coordinate(double* lat, double* lon) {
-  const float brc_center_lat = -119.20610;
-  const float brc_center_lon = 40.78684;
+  const float brc_center_lat = 40.78684;
+  const float brc_center_lon = -119.20610;
   const double r_earth = 6371393;
   double r = random_float(0.0, 2200.0);
   double offset = pi / 9.3;
@@ -74,14 +77,17 @@ void get_random_coordinate(double* lat, double* lon) {
 
 void handle_leds() {
   if (digitalRead(BTN_PLASMA) == 0) {
+    debug_serial.println("plasma");
     plasmaLoop();
     return;
   }
-  if (digitalRead(BTN_SWAP) == 0) {
-    swipeLoop(0xFFFFFF);
+  else if (digitalRead(BTW_SWIPE) == 0) {
+    debug_serial.println("swipe");
+    swipeLoop(0xAA4400);
     return;
   }
-  if (digitalRead(BTN_COLOR) == 0) {
+  else {
+    debug_serial.println("swipe color");
     swipeColor(0);
     return;
   }
@@ -89,26 +95,37 @@ void handle_leds() {
 
 volatile bool mission_set = false;
 void loop() {
-  if (battery_voltage < MIN_BAT_VOLTAGE) {
+  
+  if (false) { // 21  ` battery_voltage < MIN_BAT_VOLTAGE) {
+    debug_serial.println("BATTERY IS DEAD");
     wipeAll(0x00000);
+    delay(1000);
   } else {
     if (digitalRead(BTN_GO_HOME) == 0) {
       if (state != HOME_MODE) {
+        debug_serial.println("HOME MODE ACTIVATED");
         mav_set_mission(home_lat, home_lon);
         state = HOME_MODE;
       }
     } else if (digitalRead(BTN_GO_RANDOM) == 0) {
       if (state != RANDOM_MODE) {
-        mav_set_mission(home_lat, home_lon);
+        debug_serial.println("RANDOM MODE ACTIVATED");
+        double random_lat = 0.0;
+        double random_lon = 0.0;
+        get_random_coordinate(&random_lat, &random_lon);
+        debug_serial.println(random_lat);
+        debug_serial.println(random_lon);
+        mav_set_mission(random_lat, random_lon);
         state = RANDOM_MODE;
-      }
+      } 
     } else {
+      state = INITIAL_STATE;
       debug_serial.println("handling leds");
       handle_leds();
       return;
     }
   }
-
+  
   wipePwm(servo_in);
 
   // MAVLink
@@ -176,13 +193,18 @@ void mav_start_streams()
 }
 
 void mav_set_mission(double lat, double lon) {
+  debug_serial.print("setting mission with lat ");
+  debug_serial.print(lat);
+  debug_serial.print(" lon ");
+  debug_serial.println(lon);
+  
   mavlink_message_t msg;
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   mavlink_msg_mission_clear_all_pack(2, 200, &msg, 1, 1);
   uint16_t  len = mavlink_msg_to_send_buffer(buf, &msg);
   px4_serial.write(buf, len);
   wait_for_mission_ack();
-  mavlink_msg_mission_count_pack(2, 200, &msg, 1, 1, 2);
+  mavlink_msg_mission_count_pack(2, 200, &msg, 1, 1, 4);
   len = mavlink_msg_to_send_buffer(buf, &msg);
   px4_serial.write(buf, len);
   wait_for_mission_ack();
@@ -195,6 +217,10 @@ void mav_set_mission(double lat, double lon) {
   px4_serial.write(buf, len);
   wait_for_mission_ack();
   mavlink_msg_mission_item_pack(2, 200, &msg, 1, 1, 2, MAV_FRAME_GLOBAL, MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  len = mavlink_msg_to_send_buffer(buf, &msg);
+  px4_serial.write(buf, len);
+  wait_for_mission_ack();
+  mavlink_msg_mission_item_pack(2, 200, &msg, 1, 1, 3, MAV_FRAME_GLOBAL, MAV_CMD_MISSION_START, 0, 0, 0, 0, 0, 0, 0, 0, 0);
   len = mavlink_msg_to_send_buffer(buf, &msg);
   px4_serial.write(buf, len);
   wait_for_mission_ack();
@@ -211,13 +237,13 @@ void wait_for_mission_ack() {
       uint8_t c = px4_serial.read();
       if (mavlink_parse_char(MAVLINK_COMM_0, c, &msg, &status)) {
         switch (msg.msgid) {
-          case MAVLINK_MSG_ID_MISSION_ACK:  // #0: Heartbeat
+          case MAVLINK_MSG_ID_MISSION_ACK: 
             {
               debug_serial.println("MISSION ACK");
               return;
             }
             break;
-          case MAVLINK_MSG_ID_MISSION_REQUEST:  // #0: Heartbeat
+          case MAVLINK_MSG_ID_MISSION_REQUEST:
             {
               debug_serial.println("MISSION REQUEST");
               return;
@@ -236,7 +262,7 @@ void wait_for_mission_ack() {
 void comm_receive() {
   mavlink_message_t msg;
   mavlink_status_t status;
-
+  
   while (px4_serial.available() > 0) {
     uint8_t c = px4_serial.read();
     if (mavlink_parse_char(MAVLINK_COMM_0, c, &msg, &status)) {
